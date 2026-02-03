@@ -3,12 +3,28 @@ import json
 import mimetypes
 import pandas as pd
 import streamlit as st
-import google.generativeai as genai
+from openai import OpenAI
+import pdfplumber
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+def extract_pdf_text(uploaded_file):
+    uploaded_file.seek(0)
+    text = ""
+
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+
+    if not text.strip():
+        raise ValueError("No extractable text found in PDF")
+
+    return text
 # ----------------------------
 # Gemini Setup
 # ----------------------------
-genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+
 
 # ----------------------------
 # App Config
@@ -25,31 +41,6 @@ st.write(
 # ----------------------------
 # Helpers
 # ----------------------------
-def to_gemini_part(uploaded_file, debug=True):
-    if debug:
-        st.divider()
-        st.subheader("📄 Attaching PDF CV to Gemini")
-
-    if not uploaded_file.name.lower().endswith(".pdf"):
-        st.error("❌ Only PDF CVs are supported at the moment.")
-        raise ValueError("Non-PDF CV uploaded")
-
-    uploaded_file.seek(0)
-
-    data = uploaded_file.read()
-    if not data:
-        raise ValueError("PDF file is empty")
-
-    if debug:
-        st.write("Filename:", uploaded_file.name)
-        st.write("File size (bytes):", len(data))
-
-    return {
-        "inline_data": {
-            "mime_type": "application/pdf",
-            "data": data,
-        }
-    }
 
 #because ai output is consistent so we are making sure
 def extract_json(text, debug=True): 
@@ -145,13 +136,9 @@ def get_available_jobs(df: pd.DataFrame):
 # ----------------------------
 # AI Core
 # ----------------------------
-def generate_full_assessment(candidate_files, job, model_name, candidate_seniority):
-    
+def generate_full_assessment(candidate_texts, job, candidate_seniority):
     prompt = f"""
 You MUST output a COMPLETE and VALID JSON object.
-If you cannot finish, DO NOT start the response.
-Do not omit closing braces.
-
 Return ONLY valid JSON.
 No markdown.
 No text outside JSON.
@@ -159,38 +146,24 @@ No text outside JSON.
 あなたは、人材紹介エージェントとして
 書類選考の実務経験が豊富なキャリアアドバイザーです。
 
-以下の履歴書（CV）を読み、
-「この候補者と求人要件の整合性を、書類情報の範囲で評価してください」
-を、第三者にも説明できる形で評価してください。
+以下は【候補者の履歴書内容】です。
+これを読み、【求人情報】との整合性を
+書類情報の範囲で評価してください。
 
-【評価の前提（必ず厳守）】
-- 本評価は「書類選考段階」の判断です
-- CVに明示的に記載されている内容のみを根拠にしてください
-- 推測・補完・好意的解釈は禁止です
-- 求人票に記載された要件・文言を最重要視してください
-- ENTRY求人では、経験不足を否定的に評価してはいけません
-- 評価は「採用可否の最終判断」ではありません
+【候補者の履歴書】
+{candidate_texts}
 
 【求人レベル】
 {job["seniority"]}
 
-【候補者レベル】
-{candidate_seniority}
-
 【評価対象の求人情報】
-{job["job_context"][:1500]}
+{job["job_context"]}
 
-【評価の観点】
-- 必須要件と経歴の適合性（最重要）
-- 歓迎要件と経歴の適合性（加点要素）
-- 職務内容全体との整合性
-- 上記を踏まえた書類情報上の適合度
-
-
-IMPORTANT:
-- The JSON must start with {{ and end with }}
-- Do not truncate output
-- Do not stop mid-sentence
+【評価の前提】
+- 書類選考段階のみ
+- 明示的記載のみを根拠
+- 推測禁止
+- ENTRY求人で経験不足を否定しない
 
 【出力JSON形式（厳守）】
 {{
@@ -201,58 +174,18 @@ IMPORTANT:
   "score": 0
 }}
 """
-    st.divider()
-    st.subheader("🤖 Gemini Evaluation Call")
 
-    st.write("Model name:", model_name)
-    st.write("Candidate seniority:", candidate_seniority)
-    st.write("Job title:", job["title"])
-    st.write("Job seniority:", job["seniority"])
-    st.write("Prompt length:", len(prompt))
-    st.write("Number of attached CV files:", len(candidate_files))
-    model = genai.GenerativeModel(model_name)
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        messages=[
+            {"role": "system", "content": "You are a professional Japanese recruiter."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3
+    )
 
-    contents = [prompt, *candidate_files]
-
-    try:
-        response = model.generate_content(
-            contents,
-            generation_config={
-                "temperature": 0.3,
-                "max_output_tokens": 900,
-            }
-        )
-    except Exception as e:
-        st.error("❌ Gemini API call failed")
-        st.write("Model:", model_name)
-        st.write("Job:", job["title"])
-        st.code(repr(e))
-        raise
-
-    if not response.candidates:
-        raise ValueError("No candidates returned by Gemini")
-    
-    candidate = response.candidates[0]
-    
-    if candidate.finish_reason != 0:
-        raise ValueError(
-            f"Gemini did not generate content. "
-            f"finish_reason={candidate.finish_reason}"
-        )
-    
-    if not candidate.content or not candidate.content.parts:
-        raise ValueError("Gemini returned no content parts")
-    
-    text_parts = [
-        p.text for p in candidate.content.parts if hasattr(p, "text")
-    ]
-    
-    if not text_parts:
-        raise ValueError("No text parts found in Gemini response")
-    
-    full_text = "\n".join(text_parts)
-    
-    return extract_json(full_text)
+    text = response.choices[0].message.content
+    return extract_json(text)
 
 # ----------------------------
 # UI
@@ -268,7 +201,7 @@ jobs_file = st.file_uploader(
     type=["xlsx"]
 )
 
-MODEL_NAME = "gemini-2.5-pro"
+
 
 
 
@@ -276,60 +209,76 @@ MODEL_NAME = "gemini-2.5-pro"
 
 
 if uploaded_cvs and jobs_file and st.button("Evaluate CVs"):
+    # ----------------------------
+    # Load jobs
+    # ----------------------------
     jobs_df = pd.read_excel(jobs_file)
     jobs = get_available_jobs(jobs_df)
 
-    candidate_files = []
-    for f in uploaded_cvs:
-        candidate_files.append(to_gemini_part(f))
+    # ----------------------------
+    # Candidate setup
+    # ----------------------------
+    candidate_seniority = "ENTRY"  # intentionally fixed for now
 
-    candidate_seniority = "ENTRY"  # intentionally fixed (your original logic)
+    # Extract ALL CV text ONCE (one candidate)
+    candidate_texts = ""
+    for f in uploaded_cvs:
+        candidate_texts += extract_pdf_text(f) + "\n"
 
     st.subheader("📊 Results")
 
+    # ----------------------------
+    # Evaluate candidate against each job
+    # ----------------------------
     results = []
-    
+
     for job in jobs:
         try:
             result = generate_full_assessment(
-                candidate_files,
+                candidate_texts,
                 job,
-                MODEL_NAME,
                 candidate_seniority
             )
-    
+
             results.append({
                 "job": job,
                 "result": result
             })
-    
+
         except Exception as e:
             st.error(f"❌ Evaluation failed for job: {job['title']}")
             st.code(repr(e))
             continue
+
+    # ----------------------------
+    # Sort by score (descending)
+    # ----------------------------
     results = sorted(
         results,
         key=lambda x: x["result"]["score"],
         reverse=True
     )
-    
+
+    # ----------------------------
+    # Display results
+    # ----------------------------
     for item in results:
         job = item["job"]
         result = item["result"]
-    
+
         st.markdown(f"### {job['title']}")
         st.write(f"**Score:** {result['score']}%")
-    
+
         st.write("**Summary**")
         st.write(result["SUMMARY"])
-    
+
         st.write("**Must Have**")
         st.write(result["MUST_HAVE_REASONING"])
-        
+
         st.write("**Preferred**")
         st.write(result["PREFERRED_REASONING"])
-        
+
         st.write("**Alignment**")
         st.write(result["ROLE_ALIGNMENT_REASONING"])
-    
+
         st.divider()
