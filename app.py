@@ -43,7 +43,7 @@ st.write(
 # ----------------------------
 
 #because ai output is consistent so we are making sure
-def extract_json(text, debug=True): 
+def extract_json(text, debug=False): 
     if debug:
         st.divider()
         st.subheader("🧩 Parsing AI JSON Response")
@@ -258,6 +258,7 @@ if uploaded_cvs and jobs_file and st.button("Evaluate CVs"):
         key=lambda x: x["result"]["score"],
         reverse=True
     )
+    st.success(f"✅ Evaluated {len(results)} jobs successfully")
 
     # ----------------------------
     # Display results
