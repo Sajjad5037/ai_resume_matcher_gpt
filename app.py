@@ -226,25 +226,30 @@ if uploaded_cvs and jobs_file and st.button("Evaluate CVs"):
         candidate_texts += extract_pdf_text(f) + "\n"
 
     st.subheader("📊 Results")
+    progress_placeholder = st.empty()
+
 
     # ----------------------------
     # Evaluate candidate against each job
     # ----------------------------
     results = []
+    total_jobs = len(jobs)
 
-    for job in jobs:
+    for idx, job in enumerate(jobs, start=1):
+        progress_placeholder.info(f"🔄 Evaluating job {idx}/{total_jobs}...")
+    
         try:
             result = generate_full_assessment(
                 candidate_texts,
                 job,
                 candidate_seniority
             )
-
+    
             results.append({
                 "job": job,
                 "result": result
             })
-
+    
         except Exception as e:
             st.error(f"❌ Evaluation failed for job: {job['title']}")
             st.code(repr(e))
